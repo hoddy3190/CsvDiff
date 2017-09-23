@@ -34,10 +34,56 @@ type FromTo struct {
     To   string `json:"to"`
 }
 
-func parseBaseCsv(baseCsv io.Reader, pks []string) (baseColNames []string, pkValuesStrToRecord map[string][]string) {
+func sliceDiff(slice1 []string, slice2 []string) ([]string, []string) {
 
-    baseColNames = []string{}
-    pkValuesStrToRecord = map[string][]string{}
+    elemsOnlyInSlice1 := []string{}
+    elemsOnlyInSlice2 := []string{}
+
+    slice1Map := map[string]bool{}
+    for _, slice1Elem := range slice1 {
+        slice1Map[slice1Elem] = true
+    }
+    for _, slice2Elem := range slice2 {
+        _, exist := slice1Map[slice2Elem]
+        if !exist {
+            elemsOnlyInSlice2 = append(elemsOnlyInSlice2, slice2Elem)
+        }
+        delete(slice1Map, slice2Elem)
+    }
+    for elemOnlyInSlice1, _ := range slice1Map {
+        elemsOnlyInSlice1 = append(elemsOnlyInSlice1, elemOnlyInSlice1)
+    }
+
+    return elemsOnlyInSlice1, elemsOnlyInSlice2
+}
+
+func getPkIdxList(colNames []string, pks []string) []int {
+    pkIdxList := []int{}
+    for i, colName := range colNames {
+        for _, pk := range pks {
+            if colName == pk {
+                pkIdxList = append(pkIdxList, i)
+            }
+        }
+    }
+    return pkIdxList
+}
+
+// return "pk(1):::pk(2):::...:::pk(n)" string
+func getPkValuesStr(record []string, pkIdxList []int) string {
+    pkValues := make([]byte, 0, 128)
+    for i, pkIdx := range pkIdxList {
+        pkValues = append(pkValues, record[pkIdx]...)
+        if i < len(pkIdxList) - 1 {
+            pkValues = append(pkValues, ":::"...)
+        }
+    }
+    return string(pkValues)
+}
+
+func parseCsv(baseCsv io.Reader, pks []string) ([]string, map[string][]string) {
+    colNames := []string{}
+    pkValuesStrToRecord := map[string][]string{}
     pkIdxList := []int{}
 
     r := csv.NewReader(baseCsv)
@@ -53,37 +99,26 @@ func parseBaseCsv(baseCsv io.Reader, pks []string) (baseColNames []string, pkVal
         }
 
         // column names are written in the first line
-        if len(baseColNames) == 0 {
-            baseColNames = record
-            for i, colName := range baseColNames {
-                for _, pk := range pks {
-                    if colName == pk {
-                        pkIdxList = append(pkIdxList, i)
-                    }
-                }
-            }
+        if len(colNames) == 0 {
+            colNames = record
+            pkIdxList = getPkIdxList(colNames, pks)
             continue
         }
 
-        pkValues := make([]byte, 0, 128)
-        for i, pkIdx := range pkIdxList {
-            pkValues = append(pkValues, record[pkIdx]...)
-            if i < len(pkIdxList) - 1 {
-                pkValues = append(pkValues, ":::"...)
-            }
-        }
-        pkValuesStr := string(pkValues)
-
+        pkValuesStr := getPkValuesStr(record, pkIdxList)
         pkValuesStrToRecord[pkValuesStr] = record
     }
 
-    return baseColNames, pkValuesStrToRecord
+    return colNames, pkValuesStrToRecord
 }
 
-func csvDiff(baseCsv, comparisonCsv io.Reader, pks []string) (outputJson []byte) {
+func csvDiff(baseCsv, comparisonCsv io.Reader, pks []string) []byte {
     diffJson := DiffJson{}
+    diffJson.Added = []map[string]string{}
+    diffJson.Modified = []ModifiedContent{}
+    diffJson.Deleted = []map[string]string{}
 
-    baseColNames, basePkValuesStrToRecord := parseBaseCsv(baseCsv, pks)
+    baseColNames, basePkValuesStrToRecord := parseCsv(baseCsv, pks)
     pkIdxList := []int{}
 
     r := csv.NewReader(comparisonCsv)
@@ -103,25 +138,11 @@ func csvDiff(baseCsv, comparisonCsv io.Reader, pks []string) (outputJson []byte)
         // column names are written in the first line
         if len(comparisonColNames) == 0 {
             comparisonColNames = comparisonRecord
-            for i, colName := range comparisonColNames {
-                for _, pk := range pks {
-                    if colName == pk {
-                        pkIdxList = append(pkIdxList, i)
-                    }
-                }
-            }
+            pkIdxList = getPkIdxList(comparisonColNames, pks)
             continue
         }
 
-        pkValues := make([]byte, 0, 128)
-        for i, pkIdx := range pkIdxList {
-            pkValues = append(pkValues, comparisonRecord[pkIdx]...)
-            if i < len(pkIdxList) - 1 {
-                pkValues = append(pkValues, ":::"...)
-            }
-        }
-        pkValuesStr := string(pkValues)
-
+        pkValuesStr := getPkValuesStr(comparisonRecord, pkIdxList)
         baseRecord, exist := basePkValuesStrToRecord[pkValuesStr]
 
         comparisonColNameToVal := map[string]string{}
@@ -131,6 +152,7 @@ func csvDiff(baseCsv, comparisonCsv io.Reader, pks []string) (outputJson []byte)
 
         if exist {
             modifiedContent := ModifiedContent{}
+            modifiedContent.FromTo = map[string]FromTo{}
             existModifiedVal := false
 
             for i, colName := range baseColNames {
@@ -141,16 +163,17 @@ func csvDiff(baseCsv, comparisonCsv io.Reader, pks []string) (outputJson []byte)
                 if comparisonValue != baseRecord[i] {
                     existModifiedVal = true
 
-                    for _, pkName := range pks {
+                    if len(modifiedContent.Pks) == 0 {
                         modifiedContent.Pks = map[string]string{}
-                        modifiedContent.Pks[pkName] = comparisonColNameToVal[pkName]
+                        for _, pkName := range pks {
+                            modifiedContent.Pks[pkName] = comparisonColNameToVal[pkName]
+                        }
                     }
 
                     fromTo := FromTo{}
                     fromTo.From = baseRecord[i]
                     fromTo.To = comparisonValue
 
-                    modifiedContent.FromTo = map[string]FromTo{}
                     modifiedContent.FromTo[colName] = fromTo
                 }
             }
@@ -174,23 +197,11 @@ func csvDiff(baseCsv, comparisonCsv io.Reader, pks []string) (outputJson []byte)
         diffJson.Deleted = append(diffJson.Deleted, baseColNameToVal)
     }
 
+    deletedColumns, addedColumns := sliceDiff(baseColNames, comparisonColNames)
+    diffJson.AddedColumns = addedColumns
+    diffJson.DeletedColumns = deletedColumns
 
-    baseColNameMap := map[string]bool{}
-    for _, baseColName := range baseColNames {
-        baseColNameMap[baseColName] = true
-    }
-    for _, comparisonColName := range comparisonColNames {
-        _, exist := baseColNameMap[comparisonColName]
-        if !exist {
-            diffJson.AddedColumns = append(diffJson.AddedColumns, comparisonColName)
-        }
-        delete(baseColNameMap, comparisonColName)
-    }
-    for baseColName, _ := range baseColNameMap {
-        diffJson.DeletedColumns = append(diffJson.DeletedColumns, baseColName)
-    }
-
-    outputJson, err = json.Marshal(&diffJson)
+    outputJson, err := json.Marshal(&diffJson)
     if err != nil {
         log.Fatal(err)
     }
@@ -216,6 +227,12 @@ func main() {
 
     if len(args) != 2 {
         fmt.Println("argument num is invalid\n")
+        parser.WriteHelp(os.Stdout)
+        os.Exit(1)
+    }
+
+    if len(opts.Pks) == 0 {
+        fmt.Println("At least one pk option must be set\n")
         parser.WriteHelp(os.Stdout)
         os.Exit(1)
     }
