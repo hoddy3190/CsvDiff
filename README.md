@@ -1,4 +1,6 @@
 # CsvDiff
+[![CircleCI](https://circleci.com/gh/altitude3190/CsvDiff/tree/master.svg?style=svg)](https://circleci.com/gh/altitude3190/CsvDiff/tree/master)
+
 output csv diff smartly
 
 ## Usage
